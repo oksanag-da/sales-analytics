@@ -1,0 +1,90 @@
+WITH account_data AS (
+--collecting account data
+    SELECT
+        s.date,
+        sp.country,
+        a.send_interval as send_interval,
+        a.is_verified as is_verified,
+        a.is_unsubscribed as is_unsubscribed,
+        COUNT(a.id) AS account_cnt,
+        0 as sent_msg,
+        0 as open_msg,
+        0 as click_msg
+    FROM
+        `DA.account` a
+    left JOIN `DA.account_session` acs
+    on a.id = acs.account_id
+    join `DA.session` s
+    on acs.ga_session_id = s.ga_session_id
+    join `DA.session_params` sp
+    on s.ga_session_id = sp.ga_session_id
+    GROUP BY
+        s.date, sp.country, a.send_interval, a.is_verified, a.is_unsubscribed
+),
+email_data as (
+--collecting email metrics data
+select
+       DATE_ADD(s.date, INTERVAL ems.sent_date DAY) AS date,
+       sp.country as country,
+       a.send_interval as send_interval,
+       a.is_verified as is_verified,
+       a.is_unsubscribed as is_unsubscribed,
+       0 AS account_cnt,
+       count (distinct ems.id_message) as sent_msg,
+       count (distinct eo.id_message) as open_msg,
+       count (distinct ev.id_message) as click_msg
+  from `DA.email_sent` ems
+  join `DA.account_session` acs
+  on ems.id_account = acs.account_id
+  join `DA.account` a
+  on acs.account_id = a.id
+  join `DA.session` s
+  on acs.ga_session_id = s.ga_session_id
+  join `DA.session_params` sp
+  on s.ga_session_id = sp.ga_session_id
+  left join `DA.email_open` eo
+  on ems.id_message = eo.id_message
+  left join `DA.email_visit` ev
+  on ems.id_message = ev.id_message
+  group by date_add (s.date, INTERVAL ems.sent_date DAY), sp.country,a.send_interval, a.is_verified, a.is_unsubscribed
+),
+--combining account and email data
+union_data as (
+     SELECT * FROM account_data
+     UNION ALL
+     SELECT * FROM email_data
+),
+--groupping the united data to avoid dupes
+union_data_grouped as (
+    select ud.date as date,
+    ud.country as country,
+    ud.send_interval as send_interval,
+    ud.is_verified as is_verified,
+    ud.is_unsubscribed as is_unsubscribed,
+    sum (ud.account_cnt) as account_cnt,
+    sum (ud.sent_msg) as sent_msg,
+    sum (ud.open_msg) as open_msg,
+    sum (ud.click_msg) as click_msg
+    from union_data ud
+    group by ud.date, ud.country, ud.send_interval, ud.is_verified, ud.is_unsubscribed
+),
+
+
+final_groups as (
+--total data calculation + ranking
+select *,
+        dense_rank() over (order by total_country_account_cnt desc) as rank_total_country_account_cnt,
+        dense_rank() over (order by total_country_sent_cnt desc) as rank_total_country_sent_cnt
+from (
+Select *,
+sum (account_cnt) over (partition by country) as total_country_account_cnt,
+sum (sent_msg) over (partition by country) as total_country_sent_cnt
+from union_data_grouped
+) as final_groups
+)
+
+
+select *
+from final_groups
+where rank_total_country_account_cnt <= 10
+OR rank_total_country_sent_cnt <= 10
